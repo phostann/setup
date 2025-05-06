@@ -90,20 +90,19 @@ func run(ctx context.Context, cfg *Config) error {
 	}
 
 	// 处理子目录中的镜像和压缩文件
-	stubDir := filepath.Join(cwd, cfg.StubDirName)
-	if err := processStubDir(ctx, stubDir, cfg); err != nil {
+	if err := processStubDir(ctx, cwd, cfg); err != nil {
 		return err
 	}
 
-	// 启动Docker Compose
-	if err := startDockerCompose(ctx, cfg); err != nil {
-		return err
-	}
+	// // 启动Docker Compose
+	// if err := startDockerCompose(ctx, cfg); err != nil {
+	// 	return err
+	// }
 
-	// 配置Minio
-	if err := configureMinio(ctx, cfg); err != nil {
-		return err
-	}
+	// // 配置Minio
+	// if err := configureMinio(ctx, cfg); err != nil {
+	// 	return err
+	// }
 
 	return nil
 }
@@ -129,7 +128,7 @@ func checkAndExtractMainStub(ctx context.Context, stubTar string, cfg *Config) e
 	}
 
 	// 解压文件
-	cmd := exec.CommandContext(ctx, cfg.TarCmd, "-zxvf", stubTar)
+	cmd := exec.CommandContext(ctx, cfg.TarCmd, "-xvf", stubTar)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("解压文件失败: %w, 输出: %s", err, output)
 	}
@@ -139,9 +138,9 @@ func checkAndExtractMainStub(ctx context.Context, stubTar string, cfg *Config) e
 }
 
 // 处理Stub目录中的文件
-func processStubDir(ctx context.Context, stubDir string, cfg *Config) error {
+func processStubDir(ctx context.Context, cwd string, cfg *Config) error {
 	// 读取子目录
-	subDirs, err := os.ReadDir(stubDir)
+	subDirs, err := os.ReadDir(cwd)
 	if err != nil {
 		return fmt.Errorf("读取目录失败: %w", err)
 	}
@@ -153,6 +152,12 @@ func processStubDir(ctx context.Context, stubDir string, cfg *Config) error {
 	semaphore := make(chan struct{}, cfg.ConcurrentTasks)
 
 	for _, subDir := range subDirs {
+
+		// 如果不是文件夹，则跳过不处理
+		if !subDir.IsDir() {
+			continue
+		}
+
 		wg.Add(1)
 		semaphore <- struct{}{} // 获取信号量
 
@@ -160,7 +165,7 @@ func processStubDir(ctx context.Context, stubDir string, cfg *Config) error {
 			defer wg.Done()
 			defer func() { <-semaphore }() // 释放信号量
 
-			if err := processSubDir(ctx, filepath.Join(stubDir, subDir.Name()), cfg); err != nil {
+			if err := processSubDir(ctx, filepath.Join(cwd, subDir.Name()), cfg); err != nil {
 				errChan <- fmt.Errorf("处理子目录 %s 失败: %w", subDir.Name(), err)
 			}
 		}(subDir)
@@ -193,8 +198,21 @@ func processSubDir(ctx context.Context, subDirPath string, cfg *Config) error {
 	for _, file := range files {
 		filePath := filepath.Join(subDirPath, file.Name())
 
-		// 处理Docker镜像文件
-		if strings.HasSuffix(file.Name(), ".tar") {
+		// 如果文件后缀不是 .tar 则跳过不处理
+		if !strings.HasSuffix(file.Name(), ".tar") {
+			continue
+		}
+
+		// 处理压缩文件
+		if file.Name() == "files.tar" {
+			// 获取文件所在目录作为解压目标
+			targetDir := filepath.Dir(filePath)
+			slog.Info("正在解压文件", "file", filePath, "targetDir", targetDir)
+			cmd := exec.CommandContext(ctx, cfg.TarCmd, "-xvf", filePath, "-C", targetDir)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("tar 命令失败: %w, 输出: %s", err, output)
+			}
+		} else {
 			slog.Info("正在加载Docker镜像", "file", filePath)
 			cmd := exec.CommandContext(ctx, cfg.DockerCmd, "load", "-i", filePath)
 			if output, err := cmd.CombinedOutput(); err != nil {
@@ -202,14 +220,6 @@ func processSubDir(ctx context.Context, subDirPath string, cfg *Config) error {
 			}
 		}
 
-		// 处理压缩文件
-		if strings.HasSuffix(file.Name(), ".tar.gz") {
-			slog.Info("正在解压文件", "file", filePath)
-			cmd := exec.CommandContext(ctx, cfg.TarCmd, "-zxvf", filePath)
-			if output, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("tar 命令失败: %w, 输出: %s", err, output)
-			}
-		}
 	}
 
 	return nil
